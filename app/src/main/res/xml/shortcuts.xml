@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="watching_1"
+        android:enabled="true"
+        android:icon="@drawable/shortcut_1"
+        android:shortcutShortLabel="@string/shortcut_watching"
+        android:shortcutLongLabel="@string/shortcut_watching"
+        android:shortcutDisabledMessage="@string/shortcut_watching">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.example.nichirin"
+            android:targetClass="com.example.nichirin.MainActivity" />
+    </shortcut>
+
+    <shortcut
+        android:shortcutId="watching_2"
+        android:enabled="true"
+        android:icon="@drawable/shortcut_2"
+        android:shortcutShortLabel="@string/shortcut_watching"
+        android:shortcutLongLabel="@string/shortcut_watching"
+        android:shortcutDisabledMessage="@string/shortcut_watching">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.example.nichirin"
+            android:targetClass="com.example.nichirin.MainActivity" />
+    </shortcut>
+
+    <shortcut
+        android:shortcutId="watching_3"
+        android:enabled="true"
+        android:icon="@drawable/shortcut_3"
+        android:shortcutShortLabel="@string/shortcut_watching"
+        android:shortcutLongLabel="@string/shortcut_watching"
+        android:shortcutDisabledMessage="@string/shortcut_watching">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.example.nichirin"
+            android:targetClass="com.example.nichirin.MainActivity" />
+    </shortcut>
+</shortcuts>
