@@ -9,6 +9,20 @@ android {
         version = release(36)
     }
 
+    val releaseStoreFile = project.findProperty("RELEASE_STORE_FILE") as String? ?: "keystore/release.jks"
+    val releaseStorePassword = project.findProperty("RELEASE_STORE_PASSWORD") as String? ?: "nichirin"
+    val releaseKeyAlias = project.findProperty("RELEASE_KEY_ALIAS") as String? ?: "nichirin"
+    val releaseKeyPassword = project.findProperty("RELEASE_KEY_PASSWORD") as String? ?: "nichirin"
+
+    signingConfigs {
+        create("release") {
+            storeFile = file(releaseStoreFile)
+            storePassword = releaseStorePassword
+            keyAlias = releaseKeyAlias
+            keyPassword = releaseKeyPassword
+        }
+    }
+
     defaultConfig {
         applicationId = "com.example.nichirin"
         minSdk = 31
@@ -22,6 +36,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
