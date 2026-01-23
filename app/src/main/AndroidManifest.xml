@@ -1,8 +1,8 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- 设备特性 -->
+    <!-- 璁惧鐗规€?-->
     <uses-feature android:name="android.hardware.bluetooth" android:required="true" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
@@ -15,14 +15,16 @@
         android:name="android.permission.BLUETOOTH_CONNECT"
         tools:targetApi="s" />
 
-    <!-- 麦克风频谱 -->
+    <!-- 楹﹀厠椋庨璋?-->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 缃戠粶锛岀敤浜庡姞杞界綉缁滆儗鏅浘 -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
-    <!-- 前台服务（播放/发送时保活） -->
+    <!-- 鍓嶅彴鏈嶅姟锛堟挱鏀?鍙戦€佹椂淇濇椿锛?-->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 
-    <!-- 旧权限：仅对 Android 11 及以下生效；对 12+ 不会触发请求，但能提升“某些ROM/旧机”稳定性 -->
+    <!-- 鏃ф潈闄愶細浠呭 Android 11 鍙婁互涓嬬敓鏁堬紱瀵?12+ 涓嶄細瑙﹀彂璇锋眰锛屼絾鑳芥彁鍗団€滄煇浜汻OM/鏃ф満鈥濈ǔ瀹氭€?-->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />

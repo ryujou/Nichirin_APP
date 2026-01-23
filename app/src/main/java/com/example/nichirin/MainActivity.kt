@@ -21,7 +21,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresPermission
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
@@ -31,11 +30,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
 import androidx.core.content.ContextCompat
 import com.example.nichirin.dsp.MicSpectrumEngine
 import com.example.nichirin.dsp.Spectrum12Processor
@@ -44,6 +46,7 @@ import com.example.nichirin.ui.theme.NichirinTheme
 import java.lang.reflect.Method
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.max
+import kotlin.random.Random
 
 // 你工程里如果已有这些，删除本文件的重复定义即可
 
@@ -174,13 +177,27 @@ class MainActivity : ComponentActivity() {
                 val screen by screenState
                 val status by statusState
                 val debugMode by debugModeState
+                val context = LocalContext.current
+                val cardImageUrls = remember(context) {
+                    CardRepository.loadCardImageUrls(context)
+                }
+                val dynamicBackgroundUrl = remember(cardImageUrls) {
+                    cardImageUrls.takeIf { it.isNotEmpty() }?.random()
+                }
+                val defaultBackgroundPainter = painterResource(id = R.drawable.background)
+                val backgroundAlignment = remember {
+                    if (Random.nextBoolean()) Alignment.BottomStart else Alignment.BottomEnd
+                }
 
                 Box(modifier = Modifier.fillMaxSize()) {
-                    Image(
-                        painter = painterResource(id = R.drawable.background),
+                    AsyncImage(
+                        model = dynamicBackgroundUrl ?: R.drawable.background,
                         contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
+                        placeholder = defaultBackgroundPainter,
+                        error = defaultBackgroundPainter,
+                        fallback = defaultBackgroundPainter,
+                        contentScale = ContentScale.None,
+                        modifier = Modifier.align(backgroundAlignment)
                     )
                     Box(
                         modifier = Modifier
