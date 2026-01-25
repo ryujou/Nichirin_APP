@@ -1,4 +1,4 @@
-package com.example.nichirin
+﻿package com.example.nichirin
 
 import android.Manifest
 import android.annotation.SuppressLint
@@ -22,8 +22,10 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresPermission
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -32,10 +34,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import androidx.core.content.ContextCompat
@@ -64,6 +69,18 @@ private data class AudioParams(
     val floorDb: Float = 20f,
 )
 
+private data class LampConfig(
+    val mode: Int = 5,
+    val hue: Int = 0,
+    val sat: Int = 255,
+    val value: Int = 255,
+    val param: Int = 128,
+)
+
+private data class HsvColor(val h: Int, val s: Int, val v: Int)
+
+private enum class DetailTab { CONSOLE, CHARACTERS }
+
 class MainActivity : ComponentActivity() {
 
     private val uiHandler = Handler(Looper.getMainLooper())
@@ -85,8 +102,12 @@ class MainActivity : ComponentActivity() {
     private var txRunning = false
     private var txSource: TxSource = TxSource.SAW_400HZ
     private var testPhase = 0
-    private val txPeriodMs = 1000.0 / 400.0
+    private var txPeriodMs = 1000.0 / 400.0
     private var txNextTimeMs = 0.0
+    private var bandChunkOffset = 0
+    private var writeInFlight = false
+    private var writeInFlightToken = 0
+    private val txQueue: ArrayDeque<ByteArray> = ArrayDeque()
 
     // ---- MIC spectrum ----
     private var micEngine: MicSpectrumEngine? = null
@@ -117,6 +138,15 @@ class MainActivity : ComponentActivity() {
     private val fileSeekingState = mutableStateOf(false)
     private val fileFloorDbState = mutableStateOf(10f)
     private val fileRangeDbState = mutableStateOf(90f)
+
+    private val lampConfigState = mutableStateOf(LampConfig())
+    private val configStatusState = mutableStateOf("配置未发送")
+    private val detailTabState = mutableStateOf(DetailTab.CONSOLE)
+
+    private var awaitingConfigRead = false
+    private val notifyBuffer = java.io.ByteArrayOutputStream()
+    private var configReadToken = 0
+    private var negotiatedMtu = 23
 
     private val permLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -177,9 +207,15 @@ class MainActivity : ComponentActivity() {
                 val screen by screenState
                 val status by statusState
                 val debugMode by debugModeState
+                val lampConfig by lampConfigState
+                val configStatus by configStatusState
+                val detailTab by detailTabState
                 val context = LocalContext.current
                 val cardImageUrls = remember(context) {
                     CardRepository.loadCardImageUrls(context)
+                }
+                val characters = remember(context) {
+                    CharacterRepository.loadCharacters(context)
                 }
                 val dynamicBackgroundUrl = remember(cardImageUrls) {
                     cardImageUrls.takeIf { it.isNotEmpty() }?.random()
@@ -216,7 +252,7 @@ class MainActivity : ComponentActivity() {
                                 filterFfe0 = filterFfe0,
                                 debugMode = debugMode,
                                 onDebugModeChange = { debugModeState.value = it },
-                                onFilterChange = { },
+                                onFilterChange = { filterFfe0 = it },
                                 onStartScan = { startScan(filterFfe0) },
                                 onStopScan = { stopScan() },
                                 onClickItem = { item ->
@@ -236,12 +272,21 @@ class MainActivity : ComponentActivity() {
                                 uiMode = txUiModeState.value,
                                 audioParams = audioParamsState.value,
                                 debugMode = debugMode,
+                                detailTab = detailTab,
+                                lampConfig = lampConfig,
+                                configStatus = configStatus,
+                                characters = characters,
                                 fileName = fileNameState.value,
                                 fileProgress = fileProgressState.value,
                                 fileProgressText = fileProgressTextState.value,
                                 fileDurationMs = fileDurationMsState.value,
                                 fileSeeking = fileSeekingState.value,
                                 onDebugModeChange = { debugModeState.value = it },
+                                onDetailTabChange = { detailTabState.value = it },
+                                onLampConfigChange = { updateLampConfig(it) },
+                                onSendConfig = { sendLampConfig(lampConfigState.value) },
+                                onReadConfig = { requestConfigRead() },
+                                onPickCharacterColor = { hex -> setLampColorFromHex(hex, send = true) },
                                 onAudioParamsChange = { audioParamsState.value = it },
                                 onFileSeekStart = { fileSeekingState.value = true },
                                 onFileSeek = { progress ->
@@ -273,30 +318,75 @@ class MainActivity : ComponentActivity() {
                                     }
                                 },
                                 onToggleMic = {
+
                                     if (txUiModeState.value == TxUiMode.MIC) {
+
                                         stopAllTx()
+
                                     } else {
-                                        // 切换到 MIC：先确保文件引擎彻底停止，避免资源占用
-                                        stopTx400HZ()
-                                        stopFileSpectrum()
-                                        stopMicSpectrum()
-                                        startMicSpectrum()          // 会读取 audioParamsState
-                                        startTx400HZ(TxSource.MIC_400HZ)
-                                        txUiModeState.value = TxUiMode.MIC
+
+                                        if (lampConfigState.value.mode != 5) {
+
+                                            configStatusState.value = "请先切换到模式 5（频谱）"
+
+                                        } else {
+
+                                            // Switch to MIC: stop file engine first to avoid resource conflict
+
+                                            stopTx400HZ()
+
+                                            stopFileSpectrum()
+
+                                            stopMicSpectrum()
+
+                                            sendLampConfig(lampConfigState.value)
+
+                                            startMicSpectrum()          // Reads audioParamsState
+
+                                            startTx400HZ(TxSource.MIC_400HZ)
+
+                                            txUiModeState.value = TxUiMode.MIC
+
+                                        }
+
                                     }
+
                                 },
+
                                 onToggleFile = {
+
                                     if (txUiModeState.value == TxUiMode.FILE) {
+
                                         stopAllTx()
+
                                     } else {
-                                        // 切换到 FILE：先确保麦克风停止，再启动文件引擎
-                                        stopTx400HZ()
-                                        stopMicSpectrum()
-                                        stopFileSpectrum()
-                                        startFileSpectrum()
-                                        startTx400HZ(TxSource.FILE_400HZ)
-                                        txUiModeState.value = TxUiMode.FILE
+
+                                        if (lampConfigState.value.mode != 5) {
+
+                                            configStatusState.value = "请先切换到模式 5（频谱）"
+
+                                        } else {
+
+                                            // Switch to FILE: stop mic first, then start file engine
+
+                                            stopTx400HZ()
+
+                                            stopMicSpectrum()
+
+                                            stopFileSpectrum()
+
+                                            sendLampConfig(lampConfigState.value)
+
+                                            startFileSpectrum()
+
+                                            startTx400HZ(TxSource.FILE_400HZ)
+
+                                            txUiModeState.value = TxUiMode.FILE
+
+                                        }
+
                                     }
+
                                 },
                                 onPickFile = { filePickerLauncher.launch(arrayOf("audio/*", "video/*")) },
                                 onDisconnect = { disconnect() }
@@ -450,6 +540,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun DetailScreen(
         innerPadding: PaddingValues,
@@ -462,12 +553,21 @@ class MainActivity : ComponentActivity() {
         uiMode: TxUiMode,
         audioParams: AudioParams,
         debugMode: Boolean,
+        detailTab: DetailTab,
+        lampConfig: LampConfig,
+        configStatus: String,
+        characters: List<CharacterColor>,
         fileName: String,
         fileProgress: Float,
         fileProgressText: String,
         fileDurationMs: Int,
         fileSeeking: Boolean,
         onDebugModeChange: (Boolean) -> Unit,
+        onDetailTabChange: (DetailTab) -> Unit,
+        onLampConfigChange: (LampConfig) -> Unit,
+        onSendConfig: () -> Unit,
+        onReadConfig: () -> Unit,
+        onPickCharacterColor: (String) -> Unit,
         onAudioParamsChange: (AudioParams) -> Unit,
         onFileSeekStart: () -> Unit,
         onFileSeek: (Float) -> Unit,
@@ -480,6 +580,15 @@ class MainActivity : ComponentActivity() {
         onPickFile: () -> Unit,
         onDisconnect: () -> Unit
     ) {
+        val hsv = remember(lampConfig.hue, lampConfig.sat, lampConfig.value) {
+            HsvColor(lampConfig.hue, lampConfig.sat, lampConfig.value)
+        }
+        val currentHex = remember(hsv) { hsvToHex(hsv) }
+        var hexInput by remember { mutableStateOf(currentHex) }
+        LaunchedEffect(currentHex) {
+            hexInput = currentHex
+        }
+
         Column(
             modifier = Modifier
                 .padding(innerPadding)
@@ -496,19 +605,17 @@ class MainActivity : ComponentActivity() {
                     Text("设备详情", style = MaterialTheme.typography.titleLarge)
                     Text(dev?.name ?: "未选择设备", style = MaterialTheme.typography.bodyMedium)
                 }
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("进阶设置")
                     Spacer(Modifier.width(8.dp))
                     Switch(checked = debugMode, onCheckedChange = onDebugModeChange)
                 }
             }
 
-            // ✅ 返回/重连/断开 同一行
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.Center
             ) {
-                Spacer(Modifier.width(0.dp))
                 OutlinedButton(
                     onClick = onBack,
                     colors = ButtonDefaults.outlinedButtonColors(containerColor = Color.White)
@@ -525,194 +632,464 @@ class MainActivity : ComponentActivity() {
                 ) { Text("断开") }
             }
 
-            ElevatedCard {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("运行模式", style = MaterialTheme.typography.titleMedium)
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center
+            ) {
+                ModeBtn(
+                    text = "控制台",
+                    selected = detailTab == DetailTab.CONSOLE,
+                    onClick = { onDetailTabChange(DetailTab.CONSOLE) },
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(Modifier.width(12.dp))
+                ModeBtn(
+                    text = "角色配色",
+                    selected = detailTab == DetailTab.CHARACTERS,
+                    onClick = { onDetailTabChange(DetailTab.CHARACTERS) },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            if (detailTab == DetailTab.CHARACTERS) {
+                ElevatedCard {
+                    Column(Modifier.padding(16.dp)) {
+                        CharacterPalette(characters = characters, onPickColor = onPickCharacterColor)
+                    }
+                }
+            } else {
+                ElevatedCard {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text("模式与颜色", style = MaterialTheme.typography.titleMedium)
+
+                        val modeOptions = listOf(
+                            1 to "模式 1 · 流水",
+                            2 to "模式 2 · 爆闪",
+                            3 to "模式 3 · 常亮",
+                            4 to "模式 4 · 呼吸",
+                            5 to "模式 5 · 频谱"
+                        )
+                        val modeLabel = modeOptions.firstOrNull { it.first == lampConfig.mode }?.second
+                            ?: "模式 ${lampConfig.mode}"
+                        var expanded by remember { mutableStateOf(false) }
+                        ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = !expanded }) {
+                            OutlinedTextField(
+                                value = modeLabel,
+                                onValueChange = {},
+                                readOnly = true,
+                                label = { Text("模式") },
+                                modifier = Modifier.menuAnchor().fillMaxWidth()
+                            )
+                            ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                                modeOptions.forEach { (id, label) ->
+                                    DropdownMenuItem(
+                                        text = { Text(label) },
+                                        onClick = {
+                                            expanded = false
+                                            onLampConfigChange(lampConfig.copy(mode = id))
+                                        }
+                                    )
+                                }
+                            }
+                        }
+
+                        if (lampConfig.mode != 5) {
+                            Text("参数: ${lampConfig.param} (${formatParamHint(lampConfig.mode, lampConfig.param)})")
+                            Slider(
+                                value = lampConfig.param.toFloat(),
+                                onValueChange = { onLampConfigChange(lampConfig.copy(param = it.toInt())) },
+                                valueRange = 0f..255f
+                            )
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                val rgb = parseHexColor(currentHex)
+                                val previewColor = rgb?.let { Color(android.graphics.Color.rgb(it.first, it.second, it.third)) }
+                                    ?: Color.White
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .background(previewColor)
+                                        .border(1.dp, Color.White, CircleShape)
+                                )
+                                OutlinedTextField(
+                                    value = hexInput,
+                                    onValueChange = { hexInput = it },
+                                    singleLine = true,
+                                    label = { Text("色号") },
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Button(onClick = {
+                                    val parsed = parseHexColor(hexInput)
+                                    if (parsed != null) {
+                                        val newHsv = sanitizeLampHsv(rgbToHsv(parsed.first, parsed.second, parsed.third), lampConfig.hue)
+                                        onLampConfigChange(
+                                            lampConfig.copy(hue = newHsv.h, sat = newHsv.s, value = newHsv.v)
+                                        )
+                                    }
+                                }) {
+                                    Text("应用")
+                                }
+                            }
+
+                            Text("H: ${lampConfig.hue}")
+                            Slider(
+                                value = lampConfig.hue.toFloat(),
+                                onValueChange = { onLampConfigChange(lampConfig.copy(hue = it.toInt())) },
+                                valueRange = 0f..359f
+                            )
+                            Text("S: ${lampConfig.sat}")
+                            Slider(
+                                value = lampConfig.sat.toFloat(),
+                                onValueChange = { onLampConfigChange(lampConfig.copy(sat = it.toInt())) },
+                                valueRange = 0f..255f
+                            )
+                            Text("V: ${lampConfig.value}")
+                            Slider(
+                                value = lampConfig.value.toFloat(),
+                                onValueChange = { onLampConfigChange(lampConfig.copy(value = it.toInt())) },
+                                valueRange = 0f..255f
+                            )
+                        } else {
+                            Text("频谱模式下隐藏颜色与参数", style = MaterialTheme.typography.bodySmall)
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            OutlinedButton(onClick = onReadConfig) { Text("读取配置") }
+                            Spacer(Modifier.width(12.dp))
+                            Button(onClick = onSendConfig) { Text("发送配置") }
+                        }
+
+                        if (configStatus.isNotBlank()) {
+                            Text(configStatus, color = MaterialTheme.colorScheme.primary)
+                        }
+
                         if (debugMode) {
-                            ModeBtn(
-                                text = "锯齿",
-                                selected = (uiMode == TxUiMode.SAW),
-                                onClick = onToggleSaw,
+                            Text("连接: $conn")
+                            Text("状态: $svc")
+                            Text("MAC: ${dev?.address ?: "(none)"}")
+                            Text(txSt)
+                            Text(micSt)
+                            Text(fileSt)
+                            Text("MTU: $negotiatedMtu")
+                        }
+                    }
+                }
+
+                if (lampConfig.mode == 5) {
+                    ElevatedCard {
+                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("频谱输入", style = MaterialTheme.typography.titleMedium)
+                            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                if (debugMode) {
+                                    ModeBtn(
+                                        text = "锯齿",
+                                        selected = (uiMode == TxUiMode.SAW),
+                                        onClick = onToggleSaw,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                                ModeBtn(
+                                    text = "麦克风",
+                                    selected = (uiMode == TxUiMode.MIC),
+                                    onClick = onToggleMic,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                ModeBtn(
+                                    text = "文件",
+                                    selected = (uiMode == TxUiMode.FILE),
+                                    onClick = onToggleFile,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        }
+                    }
+
+                    ElevatedCard {
+                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("文件播放", style = MaterialTheme.typography.titleMedium)
+                            Text("当前: $fileName")
+                            LinearProgressIndicator(
+                                progress = { fileProgress.coerceIn(0f, 1f) },
                                 modifier = Modifier.fillMaxWidth()
                             )
+                            Slider(
+                                value = fileProgress.coerceIn(0f, 1f),
+                                onValueChange = {
+                                    if (!fileSeeking) onFileSeekStart()
+                                    onFileSeek(it)
+                                },
+                                onValueChangeFinished = { onFileSeekEnd(fileProgress) },
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = fileDurationMs > 0
+                            )
+                            Text(fileProgressText, style = MaterialTheme.typography.bodySmall)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                OutlinedButton(onClick = onPickFile) { Text("选择文件") }
+                            }
                         }
-                        ModeBtn(
-                            text = "麦克风",
-                            selected = (uiMode == TxUiMode.MIC),
-                            onClick = onToggleMic,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        ModeBtn(
-                            text = "文件",
-                            selected = (uiMode == TxUiMode.FILE),
-                            onClick = onToggleFile,
-                            modifier = Modifier.fillMaxWidth()
-                        )
                     }
 
                     if (debugMode) {
-                        Text("连接：$conn")
-                        Text("状态：$svc")
-                        Text("MAC: ${dev?.address ?: "(none)"}")
-                        Text(txSt)
-                        Text(micSt)
-                        Text(fileSt)
+                        ElevatedCard {
+                            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text("文件频谱参数", style = MaterialTheme.typography.titleMedium)
+                                Text("floor=${fileFloorDbState.value}  range=${fileRangeDbState.value}")
+
+                                var fileParamText by remember {
+                                    mutableStateOf("${fileFloorDbState.value.toInt()},${fileRangeDbState.value.toInt()}")
+                                }
+                                var fileHint by remember { mutableStateOf("") }
+
+                                OutlinedTextField(
+                                    value = fileParamText,
+                                    onValueChange = { fileParamText = it },
+                                    singleLine = true,
+                                    label = { Text("floor,range(例: 10,90)") },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.Center
+                                ) {
+                                    Button(onClick = {
+                                        val parsed = parseFileParams(fileParamText)
+                                        if (parsed == null) {
+                                            fileHint = "格式错误: 请输入 10,90"
+                                        } else {
+                                            fileFloorDbState.value = parsed.first
+                                            fileRangeDbState.value = parsed.second
+                                            fileHint = "已应用: floor=${parsed.first}, range=${parsed.second}"
+                                            if (uiMode == TxUiMode.FILE) {
+                                                stopAllTx()
+                                                startFileSpectrum()
+                                                startTx400HZ(TxSource.FILE_400HZ)
+                                                txUiModeState.value = TxUiMode.FILE
+                                            }
+                                        }
+                                    }) { Text("应用") }
+
+                                    Spacer(Modifier.width(12.dp))
+
+                                    OutlinedButton(onClick = {
+                                        fileFloorDbState.value = 10f
+                                        fileRangeDbState.value = 90f
+                                        fileParamText = "10,90"
+                                        fileHint = "已重置默认参数"
+                                        if (uiMode == TxUiMode.FILE) {
+                                            stopAllTx()
+                                            startFileSpectrum()
+                                            startTx400HZ(TxSource.FILE_400HZ)
+                                            txUiModeState.value = TxUiMode.FILE
+                                        }
+                                    }) { Text("默认") }
+                                }
+
+                                if (fileHint.isNotEmpty()) {
+                                    Text(fileHint, color = MaterialTheme.colorScheme.primary)
+                                }
+                            }
+                        }
+
+                        ElevatedCard {
+                            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text("音频参数", style = MaterialTheme.typography.titleMedium)
+                                Text("采样率=${audioParams.sampleRate}  块=${audioParams.blockSize}  floor=${audioParams.floorDb} dB")
+
+                                var paramText by remember {
+                                    mutableStateOf("${audioParams.sampleRate},${audioParams.blockSize},${audioParams.floorDb.toInt()}")
+                                }
+                                var hint by remember { mutableStateOf("") }
+
+                                OutlinedTextField(
+                                    value = paramText,
+                                    onValueChange = { paramText = it },
+                                    singleLine = true,
+                                    label = { Text("采样率,块,floor(例: 48000,512,20)") },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.Center
+                                ) {
+                                    Button(onClick = {
+                                        val parsed = parseAudioParamsSingleField(paramText, audioParams)
+                                        if (parsed == null) {
+                                            hint = "格式错误: 请输入 48000,512,20 或 20"
+                                        } else {
+                                            val applied = parsed.copy(blockSize = normalizeBlockSize(parsed.blockSize))
+                                            onAudioParamsChange(applied)
+                                            hint = "已应用: sr=${applied.sampleRate}, block=${applied.blockSize}, floor=${applied.floorDb}"
+                                            if (uiMode == TxUiMode.MIC) {
+                                                stopAllTx()
+                                                startMicSpectrum()
+                                                startTx400HZ(TxSource.MIC_400HZ)
+                                                txUiModeState.value = TxUiMode.MIC
+                                            }
+                                        }
+                                    }) { Text("应用") }
+
+                                    Spacer(Modifier.width(12.dp))
+
+                                    OutlinedButton(onClick = {
+                                        val def = AudioParams(48000, 512, 20f)
+                                        paramText = "48000,512,20"
+                                        onAudioParamsChange(def)
+                                        hint = "已重置默认参数"
+                                        if (uiMode == TxUiMode.MIC) {
+                                            stopAllTx()
+                                            startMicSpectrum()
+                                            startTx400HZ(TxSource.MIC_400HZ)
+                                            txUiModeState.value = TxUiMode.MIC
+                                        }
+                                    }) { Text("默认") }
+                                }
+
+                                if (hint.isNotEmpty()) {
+                                    Text(hint, color = MaterialTheme.colorScheme.primary)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    private fun CharacterPalette(
+        characters: List<CharacterColor>,
+        onPickColor: (String) -> Unit
+    ) {
+        var search by remember { mutableStateOf("") }
+        var bandFilter by remember { mutableStateOf("") }
+        val bands = remember(characters) {
+            characters.mapNotNull { it.band.takeIf { band -> band.isNotBlank() } }
+                .distinct()
+                .sorted()
+        }
+        val filtered = remember(search, bandFilter, characters) {
+            characters.filter { item ->
+                val bandOk = bandFilter.isBlank() || item.band == bandFilter
+                val nameOk = search.isBlank() || item.name.contains(search, ignoreCase = true)
+                bandOk && nameOk
+            }
+        }
+
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("角色配色", style = MaterialTheme.typography.titleMedium)
+            Text("点击角色头像切换应援色", style = MaterialTheme.typography.bodySmall)
+
+            OutlinedTextField(
+                value = search,
+                onValueChange = { search = it },
+                singleLine = true,
+                label = { Text("搜索角色") },
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            var expanded by remember { mutableStateOf(false) }
+            val bandLabel = if (bandFilter.isBlank()) "全部乐队" else bandFilter
+            ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = !expanded }) {
+                OutlinedTextField(
+                    value = bandLabel,
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("乐队") },
+                    modifier = Modifier.menuAnchor().fillMaxWidth()
+                )
+                ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                    DropdownMenuItem(text = { Text("全部乐队") }, onClick = {
+                        bandFilter = ""
+                        expanded = false
+                    })
+                    bands.forEach { band ->
+                        DropdownMenuItem(text = { Text(band) }, onClick = {
+                            bandFilter = band
+                            expanded = false
+                        })
                     }
                 }
             }
 
-            ElevatedCard {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("文件频谱", style = MaterialTheme.typography.titleMedium)
-                    Text("当前：$fileName")
-                    LinearProgressIndicator(
-                        progress = { fileProgress.coerceIn(0f, 1f) },
-                        modifier = Modifier.fillMaxWidth()
+            Text("共 ${filtered.size} 名角色", style = MaterialTheme.typography.bodySmall)
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                filtered.forEach { item ->
+                    CharacterRow(item = item, onPickColor = onPickColor)
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun CharacterRow(
+        item: CharacterColor,
+        onPickColor: (String) -> Unit
+    ) {
+        val imagePath = remember(item.image) { CharacterRepository.resolveImagePath(item.image) }
+        val rgb = remember(item.hex) { parseHexColor(item.hex) }
+        val chipColor = rgb?.let { Color(android.graphics.Color.rgb(it.first, it.second, it.third)) }
+            ?: Color.LightGray
+        ElevatedCard(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onPickColor(item.hex) }
+        ) {
+            Row(
+                modifier = Modifier.padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                if (imagePath != null) {
+                    AsyncImage(
+                        model = imagePath,
+                        contentDescription = item.name,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape),
+                        contentScale = ContentScale.Crop
                     )
-                    Slider(
-                        value = fileProgress.coerceIn(0f, 1f),
-                        onValueChange = {
-                            if (!fileSeeking) onFileSeekStart()
-                            onFileSeek(it)
-                        },
-                        onValueChangeFinished = { onFileSeekEnd(fileProgress) },
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = fileDurationMs > 0
-                    )
-                    Text(fileProgressText, style = MaterialTheme.typography.bodySmall)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.Center
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.2f)),
+                        contentAlignment = Alignment.Center
                     ) {
-                        OutlinedButton(onClick = onPickFile) { Text("选择文件") }
-                    }
-                }
-            }
-
-            if (debugMode) {
-                ElevatedCard {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("文件频谱参数", style = MaterialTheme.typography.titleMedium)
-                        Text("floor=${fileFloorDbState.value}  range=${fileRangeDbState.value}")
-
-                        var fileParamText by remember {
-                            mutableStateOf("${fileFloorDbState.value.toInt()},${fileRangeDbState.value.toInt()}")
-                        }
-                        var fileHint by remember { mutableStateOf("") }
-
-                        OutlinedTextField(
-                            value = fileParamText,
-                            onValueChange = { fileParamText = it },
-                            singleLine = true,
-                            label = { Text("floor,range（例：10,90）") },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.Center
-                        ) {
-                            Button(onClick = {
-                                val parsed = parseFileParams(fileParamText)
-                                if (parsed == null) {
-                                    fileHint = "格式错误：请输入 “10,90”"
-                                } else {
-                                    fileFloorDbState.value = parsed.first
-                                    fileRangeDbState.value = parsed.second
-                                    fileHint = "已应用：floor=${parsed.first}, range=${parsed.second}"
-                                    if (uiMode == TxUiMode.FILE) {
-                                        stopAllTx()
-                                        startFileSpectrum()
-                                        startTx400HZ(TxSource.FILE_400HZ)
-                                        txUiModeState.value = TxUiMode.FILE
-                                    }
-                                }
-                            }) { Text("应用") }
-
-                            Spacer(Modifier.width(12.dp))
-
-                            OutlinedButton(onClick = {
-                                fileFloorDbState.value = 10f
-                                fileRangeDbState.value = 90f
-                                fileParamText = "10,90"
-                                fileHint = "已重置默认参数"
-                                if (uiMode == TxUiMode.FILE) {
-                                    stopAllTx()
-                                    startFileSpectrum()
-                                    startTx400HZ(TxSource.FILE_400HZ)
-                                    txUiModeState.value = TxUiMode.FILE
-                                }
-                            }) { Text("默认") }
-                        }
-
-                        if (fileHint.isNotEmpty()) {
-                            Text(fileHint, color = MaterialTheme.colorScheme.primary)
-                        }
+                        Text(item.name.take(1))
                     }
                 }
 
-                ElevatedCard {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("音频参数", style = MaterialTheme.typography.titleMedium)
-                        Text("采样率=${audioParams.sampleRate}  块=${audioParams.blockSize}  floor=${audioParams.floorDb} dB")
-
-                        var paramText by remember {
-                            mutableStateOf("${audioParams.sampleRate},${audioParams.blockSize},${audioParams.floorDb.toInt()}")
-                        }
-                        var hint by remember { mutableStateOf("") }
-
-                        OutlinedTextField(
-                            value = paramText,
-                            onValueChange = { paramText = it },
-                            singleLine = true,
-                            label = { Text("采样率,块,floor（例：48000,512,20）") },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.Center
-                        ) {
-                            Button(onClick = {
-                                val parsed = parseAudioParamsSingleField(paramText, audioParams)
-                                if (parsed == null) {
-                                    hint = "格式错误：请输入 “48000,512,20” 或只填 “20”"
-                                } else {
-                                    val applied = parsed.copy(blockSize = normalizeBlockSize(parsed.blockSize))
-                                    onAudioParamsChange(applied)
-                                    hint = "已应用：sr=${applied.sampleRate}, block=${applied.blockSize}, floor=${applied.floorDb}"
-                                    // 如果正在 MIC 模式：让参数立即生效（重启 MIC 引擎）
-                                    if (uiMode == TxUiMode.MIC) {
-                                        stopAllTx()
-                                        startMicSpectrum()
-                                        startTx400HZ(TxSource.MIC_400HZ)
-                                        txUiModeState.value = TxUiMode.MIC
-                                    }
-                                }
-                            }) { Text("应用") }
-
-                            Spacer(Modifier.width(12.dp))
-
-                            OutlinedButton(onClick = {
-                                val def = AudioParams(48000, 512, 20f)
-                                paramText = "48000,512,20"
-                                onAudioParamsChange(def)
-                                hint = "已重置默认参数"
-                                if (uiMode == TxUiMode.MIC) {
-                                    stopAllTx()
-                                    startMicSpectrum()
-                                    startTx400HZ(TxSource.MIC_400HZ)
-                                    txUiModeState.value = TxUiMode.MIC
-                                }
-                            }) { Text("默认") }
-                        }
-
-                        if (hint.isNotEmpty()) {
-                            Text(hint, color = MaterialTheme.colorScheme.primary)
-                        }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(item.name, style = MaterialTheme.typography.bodyLarge)
+                    if (item.band.isNotBlank()) {
+                        Text(item.band, style = MaterialTheme.typography.bodySmall)
                     }
                 }
+
+                Box(
+                    modifier = Modifier
+                        .size(16.dp)
+                        .clip(CircleShape)
+                        .background(chipColor)
+                        .border(1.dp, Color.White, CircleShape)
+                )
             }
         }
     }
@@ -802,6 +1179,185 @@ class MainActivity : ComponentActivity() {
         var v = 1
         while (v < n) v = v shl 1
         return v.coerceAtLeast(128).coerceAtMost(8192)
+    }
+
+    // ---------------- Lamp config / color utils ----------------
+
+    private fun clampInt(v: Int, lo: Int, hi: Int): Int = v.coerceIn(lo, hi)
+
+    private fun updateLampConfig(next: LampConfig) {
+        val fixed = next.copy(
+            mode = clampInt(next.mode, 1, 5),
+            hue = clampInt(next.hue, 0, 359),
+            sat = clampInt(next.sat, 0, 255),
+            value = clampInt(next.value, 0, 255),
+            param = clampInt(next.param, 0, 255)
+        )
+        val prevMode = lampConfigState.value.mode
+        lampConfigState.value = fixed
+        if (prevMode == 5 && fixed.mode != 5) {
+            stopAllTx()
+        }
+    }
+
+    private fun sendLampConfig(config: LampConfig) {
+        if (!ensureBlePermOrHint()) return
+        val values = if (config.mode == 5) {
+            intArrayOf(
+                config.mode and 0xFFFF,
+                clampInt(config.hue, 0, 359),
+                clampInt(config.sat, 0, 255),
+                clampInt(config.value, 0, 255)
+            )
+        } else {
+            intArrayOf(
+                config.mode and 0xFFFF,
+                clampInt(config.hue, 0, 359),
+                clampInt(config.sat, 0, 255),
+                clampInt(config.value, 0, 255),
+                clampInt(config.param, 0, 255)
+            )
+        }
+        val frame = buildWriteMultipleRegisters(REG_MODE, values)
+        val ok = writeBlePayload(frame, { msg ->
+            configStatusState.value = "配置发送失败：$msg"
+        }, preferResponse = true)
+        if (ok) {
+            configStatusState.value = "配置已发送"
+        }
+    }
+
+    private fun requestConfigRead() {
+        if (!ensureBlePermOrHint()) return
+        if (txRunning) {
+            configStatusState.value = "请先停止频谱发送"
+            return
+        }
+        if (awaitingConfigRead) {
+            configStatusState.value = "读取中，请稍候"
+            return
+        }
+        val frame = buildReadHoldingRegisters(REG_MODE, 5)
+        awaitingConfigRead = true
+        notifyBuffer.reset()
+        val token = ++configReadToken
+        configStatusState.value = "读取中…"
+        val ok = writeBlePayload(frame, { msg ->
+            awaitingConfigRead = false
+            configStatusState.value = "读取失败：$msg"
+        }, preferResponse = true)
+        if (!ok) return
+        uiHandler.postDelayed({
+            if (awaitingConfigRead && configReadToken == token) {
+                awaitingConfigRead = false
+                configStatusState.value = "读取超时"
+            }
+        }, 1200)
+    }
+
+    private fun setLampColorFromHex(hex: String, send: Boolean) {
+        val rgb = parseHexColor(hex) ?: return
+        val hsv = rgbToHsv(rgb.first, rgb.second, rgb.third)
+        val fixed = sanitizeLampHsv(hsv, lampConfigState.value.hue)
+        updateLampConfig(
+            lampConfigState.value.copy(hue = fixed.h, sat = fixed.s, value = fixed.v)
+        )
+        if (send) {
+            sendLampConfig(lampConfigState.value)
+        }
+    }
+
+    private fun parseHexColor(input: String): Triple<Int, Int, Int>? {
+        val raw = input.trim()
+        if (raw.isEmpty()) return null
+        val s = if (raw.startsWith("#")) raw.substring(1) else raw
+        if (!s.matches(Regex("[0-9a-fA-F]{6}"))) return null
+        val r = s.substring(0, 2).toInt(16)
+        val g = s.substring(2, 4).toInt(16)
+        val b = s.substring(4, 6).toInt(16)
+        return Triple(r, g, b)
+    }
+
+    private fun toHex2(v: Int): String = v.coerceIn(0, 255).toString(16).padStart(2, '0').uppercase()
+
+    private fun hsvToHex(hsv: HsvColor): String {
+        val rgb = hsvToRgb(hsv.h, hsv.s, hsv.v)
+        return "#${toHex2(rgb.first)}${toHex2(rgb.second)}${toHex2(rgb.third)}"
+    }
+
+    private fun sanitizeLampHsv(next: HsvColor, fallbackHue: Int): HsvColor {
+        var h = next.h
+        var s = next.s
+        var v = next.v
+        if (v <= 0) {
+            h = fallbackHue
+        }
+        return HsvColor(clampInt(h, 0, 359), clampInt(s, 0, 255), clampInt(v, 0, 255))
+    }
+
+    private fun rgbToHsv(r: Int, g: Int, b: Int): HsvColor {
+        val rn = r / 255f
+        val gn = g / 255f
+        val bn = b / 255f
+        val max = maxOf(rn, gn, bn)
+        val min = minOf(rn, gn, bn)
+        val d = max - min
+        var h = 0f
+        if (d > 1e-6f) {
+            h = when (max) {
+                rn -> ((gn - bn) / d) % 6f
+                gn -> (bn - rn) / d + 2f
+                else -> (rn - gn) / d + 4f
+            }
+            h *= 60f
+            if (h < 0f) h += 360f
+        }
+        val s = if (max == 0f) 0f else d / max
+        val v = max
+        return HsvColor(h.toInt() % 360, (s * 255f).toInt(), (v * 255f).toInt())
+    }
+
+    private fun hsvToRgb(h: Int, s: Int, v: Int): Triple<Int, Int, Int> {
+        val sn = clampInt(s, 0, 255) / 255f
+        val vn = clampInt(v, 0, 255) / 255f
+        val hh = ((h % 360) + 360) % 360
+        val c = vn * sn
+        val x = c * (1f - kotlin.math.abs(((hh / 60f) % 2f) - 1f))
+        val m = vn - c
+        val (r1, g1, b1) = when {
+            hh < 60 -> Triple(c, x, 0f)
+            hh < 120 -> Triple(x, c, 0f)
+            hh < 180 -> Triple(0f, c, x)
+            hh < 240 -> Triple(0f, x, c)
+            hh < 300 -> Triple(x, 0f, c)
+            else -> Triple(c, 0f, x)
+        }
+        val r = ((r1 + m) * 255f).toInt()
+        val g = ((g1 + m) * 255f).toInt()
+        val b = ((b1 + m) * 255f).toInt()
+        return Triple(r, g, b)
+    }
+
+    private fun formatParamHint(mode: Int, param: Int): String {
+        return when (mode) {
+            1 -> {
+                val ms = 40f + (param * (320f - 40f) / 255f)
+                "${ms.toInt()} ms"
+            }
+            2 -> {
+                val ms = 80f + (param * (2000f - 80f) / 255f)
+                "${ms.toInt()} ms"
+            }
+            3 -> {
+                val pct = (param / 255f) * 100f
+                "${pct.toInt()} %"
+            }
+            4 -> {
+                val step = 1f + ((255 - param) * 4f) / 255f
+                "步进 ${"%.1f".format(step)}"
+            }
+            else -> param.toString()
+        }
     }
 
     // ---------------- BLE scan ----------------
@@ -975,26 +1531,161 @@ class MainActivity : ComponentActivity() {
             }
 
             val svc = g.getService(UUID_FFE0)
-            val wc = svc?.getCharacteristic(UUID_FFE1)
-            val nc = svc?.getCharacteristic(UUID_FFE2)
+            var wc = svc?.getCharacteristic(UUID_FFE1)
+            var nc = svc?.getCharacteristic(UUID_FFE2)
+
+            if (wc == null) {
+                for (service in g.services) {
+                    val candidate = service.getCharacteristic(UUID_FFE1)
+                    if (candidate != null) {
+                        wc = candidate
+                        if (nc == null) {
+                            nc = service.getCharacteristic(UUID_FFE2)
+                        }
+                        break
+                    }
+                }
+            }
+
+            if (wc == null) {
+                for (service in g.services) {
+                    val candidate = service.characteristics.firstOrNull { ch ->
+                        ch.uuid.toString().lowercase().contains("ffe1")
+                    }
+                    if (candidate != null) {
+                        wc = candidate
+                        if (nc == null) {
+                            nc = service.characteristics.firstOrNull { ch ->
+                                ch.uuid.toString().lowercase().contains("ffe2")
+                            }
+                        }
+                        break
+                    }
+                }
+            }
+
+            if (wc == null) {
+                for (service in g.services) {
+                    val candidate = service.characteristics.firstOrNull { ch ->
+                        (ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0 ||
+                            (ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+                    }
+                    if (candidate != null) {
+                        wc = candidate
+                        if (nc == null) {
+                            nc = service.characteristics.firstOrNull { ch ->
+                                (ch.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0
+                            }
+                        }
+                        break
+                    }
+                }
+            }
 
             writeChar = wc
             notifyChar = nc
 
             uiHandler.post {
-                servicesState.value = "服务已发现"
+                servicesState.value = if (wc == null) "服务已发现（未找到FFE1）" else "服务已发现"
             }
 
             if (nc != null) {
                 enableNotify(g, nc)
             }
+            if (wc != null) {
+                try {
+                    g.requestMtu(247)
+                } catch (_: Exception) {
+                }
+            }
         }
+        override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
+            negotiatedMtu = mtu
+        }
+
+        override fun onCharacteristicWrite(
+            g: BluetoothGatt,
+            c: BluetoothGattCharacteristic,
+            status: Int
+        ) {
+            writeInFlight = false
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                uiHandler.post {
+                    txState.value = "TX: 写入失败 $status"
+                }
+                txQueue.clear()
+            } else {
+                uiHandler.post { drainTxQueue() }
+            }
+        }
+
 
         @Deprecated("Deprecated in Java")
 
 
         override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic, value: ByteArray) {
-            // 可选：处理上行
+            if (!awaitingConfigRead || value.isEmpty()) return
+            fun postStatus(msg: String) {
+                uiHandler.post { configStatusState.value = msg }
+            }
+            notifyBuffer.write(value)
+            val data = notifyBuffer.toByteArray()
+            if (data.size < 5) return
+            val addr = data[0].toInt() and 0xFF
+            val func = data[1].toInt() and 0xFF
+            if (addr != MODBUS_ADDR) {
+                awaitingConfigRead = false
+                notifyBuffer.reset()
+                postStatus("读取配置失败：地址不匹配")
+                return
+            }
+            if (func == 0x83) {
+                awaitingConfigRead = false
+                notifyBuffer.reset()
+                val errCode = data.getOrNull(2)?.toInt()?.and(0xFF) ?: 0
+                postStatus("读取配置失败：异常码 0x${errCode.toString(16)}")
+                return
+            }
+            if (func != 0x03) return
+            val byteCount = data[2].toInt() and 0xFF
+            val expectedLen = 3 + byteCount + 2
+            if (data.size < expectedLen) return
+            val frame = data.copyOf(expectedLen)
+            notifyBuffer.reset()
+            if (!verifyCrc(frame)) {
+                awaitingConfigRead = false
+                postStatus("读取配置失败：CRC 错误")
+                return
+            }
+            val regs = byteCount / 2
+            if (regs < 4) {
+                awaitingConfigRead = false
+                postStatus("读取配置失败：长度不足")
+                return
+            }
+            val values = IntArray(regs)
+            for (i in 0 until regs) {
+                val hi = frame[3 + i * 2].toInt() and 0xFF
+                val lo = frame[4 + i * 2].toInt() and 0xFF
+                values[i] = (hi shl 8) or lo
+            }
+            val nextMode = values[0]
+            val nextHue = clampInt(values[1], 0, 359)
+            val nextSat = clampInt(values[2], 0, 255)
+            val nextVal = clampInt(values[3], 0, 255)
+            val nextParam = if (values.size >= 5 && nextMode != 5) clampInt(values[4], 0, 255) else lampConfigState.value.param
+            awaitingConfigRead = false
+            val nextConfig = lampConfigState.value.copy(
+                mode = nextMode,
+                hue = nextHue,
+                sat = nextSat,
+                value = nextVal,
+                param = nextParam
+            )
+            uiHandler.post {
+                updateLampConfig(nextConfig)
+                configStatusState.value = "读取配置成功"
+            }
         }
     }
 
@@ -1026,6 +1717,8 @@ class MainActivity : ComponentActivity() {
             gatt = null
             writeChar = null
             notifyChar = null
+            awaitingConfigRead = false
+            notifyBuffer.reset()
         }
     }
 
@@ -1057,19 +1750,21 @@ class MainActivity : ComponentActivity() {
     private fun startTx400HZ(source: TxSource) {
         if (!ensureBlePermOrHint()) return
         if (gatt == null || writeChar == null) {
-            txState.value = "TX: 未连接或未找到 FFE1"
+            txState.value = "TX: 未连接或未找到FFE1"
             return
         }
 
+        txPeriodMs = if (lampConfigState.value.mode == 5) 20.0 else 1000.0 / 400.0
         txSource = source
 
+        val rateHz = (1000.0 / txPeriodMs).toInt()
         if (txRunning) {
-            txState.value = "TX: RUN (400Hz, ${source.name})"
+            txState.value = "TX: RUN (${rateHz}Hz, ${source.name})"
             return
         }
 
         txRunning = true
-        txState.value = "TX: RUN (400Hz, ${source.name})"
+        txState.value = "TX: RUN (${rateHz}Hz, ${source.name})"
         ForegroundKeepAliveService.start(this)
         txHandler.post(txRunnable)
     }
@@ -1250,6 +1945,8 @@ class MainActivity : ComponentActivity() {
         stopMicSpectrum()
         stopFileSpectrum()
         txUiModeState.value = TxUiMode.STOP
+        bandChunkOffset = 0
+        txQueue.clear()
     }
 
     // ---------------- Send frame ----------------
@@ -1257,23 +1954,94 @@ class MainActivity : ComponentActivity() {
     @SuppressLint("MissingPermission")
     @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
     private fun sendBandsFrame(bands12: IntArray) {
-        val g = gatt ?: run {
-            txState.value = "TX: 未连接"
+        val maxPayload = (negotiatedMtu - 3).coerceAtLeast(20)
+        val payload = buildSpectrumFrame(bands12)
+        if (payload.size <= maxPayload) {
+            enqueueTxFrames(listOf(payload))
             return
+        }
+
+        val maxRegs = ((maxPayload - 9) / 2).coerceAtLeast(1)
+        if (maxRegs >= REG_BAND_COUNT) return
+
+        val frames = ArrayList<ByteArray>()
+        var idx = bandChunkOffset
+        var remaining = REG_BAND_COUNT
+        while (remaining > 0) {
+            val count = kotlin.math.min(maxRegs, remaining)
+            val slice = IntArray(count) { i -> bands12[idx + i].coerceIn(0, 255) }
+            frames.add(buildWriteMultipleRegisters(REG_BAND_BASE + idx, slice))
+            idx += count
+            remaining -= count
+        }
+        bandChunkOffset = 0
+        enqueueTxFrames(frames)
+    }
+
+    private fun enqueueTxFrames(frames: List<ByteArray>) {
+        if (frames.isEmpty()) return
+        txQueue.clear()
+        txQueue.addAll(frames)
+        drainTxQueue()
+    }
+
+    private fun drainTxQueue() {
+        if (writeInFlight || txQueue.isEmpty()) return
+        val frame = txQueue.removeFirst()
+        val ok = writeBlePayload(frame, { msg ->
+            txState.value = "TX: $msg"
+        }, preferResponse = true)
+        if (!ok) {
+            txQueue.clear()
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun writeBlePayload(
+        payload: ByteArray,
+        onError: (String) -> Unit,
+        preferResponse: Boolean = false
+    ): Boolean {
+        val g = gatt ?: run {
+            onError("未连接")
+            return false
         }
         val wc = writeChar ?: run {
-            txState.value = "TX: 未找到 FFE1"
-            return
+            onError("未找到FFE1")
+            return false
         }
-
-        val payload = buildFrame(bands12)
-
         try {
+            val supportsWrite =
+                (wc.properties and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0
             val supportsWnr =
                 (wc.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+            val maxPayload = (negotiatedMtu - 3).coerceAtLeast(20)
+            val needsLongWrite = payload.size > maxPayload
+            if (needsLongWrite && !supportsWrite) {
+                onError("MTU 不足且特征不支持长写（$negotiatedMtu）")
+                return false
+            }
             val writeType =
-                if (supportsWnr) BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-                else BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                if ((needsLongWrite || preferResponse) && supportsWrite) {
+                    BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                } else if (supportsWnr) {
+                    BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                } else {
+                    BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                }
+            if (writeType == BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) {
+                if (writeInFlight) {
+                    onError("写入忙")
+                    return false
+                }
+                writeInFlight = true
+                val token = ++writeInFlightToken
+                uiHandler.postDelayed({
+                    if (writeInFlight && writeInFlightToken == token) {
+                        writeInFlight = false
+                    }
+                }, 400)
+            }
 
             if (Build.VERSION.SDK_INT >= 33) {
                 g.writeCharacteristic(wc, payload, writeType)
@@ -1285,10 +2053,13 @@ class MainActivity : ComponentActivity() {
                 g.writeCharacteristic(wc)
             }
         } catch (_: SecurityException) {
-            txState.value = "TX: 权限被拒绝"
+            onError("权限被拒绝")
+            return false
         } catch (e: Exception) {
-            txState.value = "TX: 写入异常 ${e.message}"
+            onError("写入异常 ${e.message}")
+            return false
         }
+        return true
     }
 
     @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
@@ -1300,31 +2071,6 @@ class MainActivity : ComponentActivity() {
     }
 
     // ---------------- Helpers ----------------
-
-    private fun buildFrame(bands12: IntArray): ByteArray {
-        // 16 bytes: [ADDR=0x01][FUNC=0x20][12*U8][CRC16_L][CRC16_H]
-        val out = ByteArray(16)
-        out[0] = 0x01
-        out[1] = 0x20
-        for (i in 0 until 12) {
-            out[2 + i] = (bands12.getOrNull(i) ?: 0).toByte()
-        }
-        val crc = crc16Modbus(out)
-        out[14] = (crc and 0xFF).toByte()
-        out[15] = ((crc ushr 8) and 0xFF).toByte()
-        return out
-    }
-
-    private fun crc16Modbus(data: ByteArray): Int {
-        var crc = 0xFFFF
-        for (i in 0 until 14) {
-            crc = crc xor (data[i].toInt() and 0xFF)
-            repeat(8) {
-                crc = if ((crc and 0x0001) != 0) (crc ushr 1) xor 0xA001 else (crc ushr 1)
-            }
-        }
-        return crc and 0xFFFF
-    }
 
     private fun fmtMmSs(ms: Int): String {
         val s = max(0, ms / 1000)
