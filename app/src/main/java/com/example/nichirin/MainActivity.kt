@@ -132,12 +132,12 @@ class MainActivity : ComponentActivity() {
     private val debugModeState = mutableStateOf(false)
     private val fileUriState = mutableStateOf<Uri?>(null)
     private val fileNameState = mutableStateOf("未选择文件")
-    private val fileProgressState = mutableStateOf(0f)
+    private val fileProgressState = mutableFloatStateOf(0f)
     private val fileProgressTextState = mutableStateOf("00:00 / 00:00")
-    private val fileDurationMsState = mutableStateOf(0)
+    private val fileDurationMsState = mutableIntStateOf(0)
     private val fileSeekingState = mutableStateOf(false)
-    private val fileFloorDbState = mutableStateOf(10f)
-    private val fileRangeDbState = mutableStateOf(90f)
+    private val fileFloorDbState = mutableFloatStateOf(10f)
+    private val fileRangeDbState = mutableFloatStateOf(90f)
 
     private val lampConfigState = mutableStateOf(LampConfig())
     private val configStatusState = mutableStateOf("配置未发送")
@@ -172,9 +172,9 @@ class MainActivity : ComponentActivity() {
             fileUriState.value = uri
             fileNameState.value = getDisplayName(uri) ?: "已选择文件"
             fileState.value = "FILE: READY"
-            fileProgressState.value = 0f
+            fileProgressState.floatValue = 0f
             fileProgressTextState.value = "00:00 / 00:00"
-            fileDurationMsState.value = 0
+            fileDurationMsState.intValue = 0
         }
     }
 
@@ -277,27 +277,27 @@ class MainActivity : ComponentActivity() {
                                 configStatus = configStatus,
                                 characters = characters,
                                 fileName = fileNameState.value,
-                                fileProgress = fileProgressState.value,
+                                fileProgress = fileProgressState.floatValue,
                                 fileProgressText = fileProgressTextState.value,
-                                fileDurationMs = fileDurationMsState.value,
+                                fileDurationMs = fileDurationMsState.intValue,
                                 fileSeeking = fileSeekingState.value,
                                 onDebugModeChange = { debugModeState.value = it },
                                 onDetailTabChange = { detailTabState.value = it },
                                 onLampConfigChange = { updateLampConfig(it) },
                                 onSendConfig = { sendLampConfig(lampConfigState.value) },
                                 onReadConfig = { requestConfigRead() },
-                                onPickCharacterColor = { hex -> setLampColorFromHex(hex, send = true) },
+                                onPickCharacterColor = { hex -> setLampColorFromHex(hex) },
                                 onAudioParamsChange = { audioParamsState.value = it },
                                 onFileSeekStart = { fileSeekingState.value = true },
                                 onFileSeek = { progress ->
-                                    fileProgressState.value = progress.coerceIn(0f, 1f)
-                                    val dur = fileDurationMsState.value
-                                    val pos = (dur * fileProgressState.value).toInt()
+                                    fileProgressState.floatValue = progress.coerceIn(0f, 1f)
+                                    val dur = fileDurationMsState.intValue
+                                    val pos = (dur * fileProgressState.floatValue).toInt()
                                     fileProgressTextState.value = "${fmtMmSs(pos)} / ${fmtMmSs(dur)}"
                                 },
                                 onFileSeekEnd = { progress ->
                                     fileSeekingState.value = false
-                                    val durMs = fileDurationMsState.value
+                                    val durMs = fileDurationMsState.intValue
                                     val targetMs = (durMs * progress.coerceIn(0f, 1f)).toLong()
                                     fileEngine?.seekTo(targetMs * 1000L)
                                 },
@@ -399,7 +399,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun registerDynamicShortcuts() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N_MR1) return
         val mgr = getSystemService(ShortcutManager::class.java) ?: return
 
         val intent = Intent(this, MainActivity::class.java).apply {
@@ -460,7 +459,7 @@ class MainActivity : ComponentActivity() {
                     Text("小日轮", style = MaterialTheme.typography.titleLarge)
                     Text("选择小日轮并连接", style = MaterialTheme.typography.bodyMedium)
                 }
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("进阶设置")
                     Spacer(Modifier.width(8.dp))
                     Switch(checked = debugMode, onCheckedChange = onDebugModeChange)
@@ -678,7 +677,7 @@ class MainActivity : ComponentActivity() {
                                 onValueChange = {},
                                 readOnly = true,
                                 label = { Text("模式") },
-                                modifier = Modifier.menuAnchor().fillMaxWidth()
+                                modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable, enabled = true).fillMaxWidth()
                             )
                             ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                                 modeOptions.forEach { (id, label) ->
@@ -845,10 +844,10 @@ class MainActivity : ComponentActivity() {
                         ElevatedCard {
                             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text("文件频谱参数", style = MaterialTheme.typography.titleMedium)
-                                Text("floor=${fileFloorDbState.value}  range=${fileRangeDbState.value}")
+                                Text("floor=${fileFloorDbState.floatValue}  range=${fileRangeDbState.floatValue}")
 
                                 var fileParamText by remember {
-                                    mutableStateOf("${fileFloorDbState.value.toInt()},${fileRangeDbState.value.toInt()}")
+                                    mutableStateOf("${fileFloorDbState.floatValue.toInt()},${fileRangeDbState.floatValue.toInt()}")
                                 }
                                 var fileHint by remember { mutableStateOf("") }
 
@@ -869,8 +868,8 @@ class MainActivity : ComponentActivity() {
                                         if (parsed == null) {
                                             fileHint = "格式错误: 请输入 10,90"
                                         } else {
-                                            fileFloorDbState.value = parsed.first
-                                            fileRangeDbState.value = parsed.second
+                                            fileFloorDbState.floatValue = parsed.first
+                                            fileRangeDbState.floatValue = parsed.second
                                             fileHint = "已应用: floor=${parsed.first}, range=${parsed.second}"
                                             if (uiMode == TxUiMode.FILE) {
                                                 stopAllTx()
@@ -884,8 +883,8 @@ class MainActivity : ComponentActivity() {
                                     Spacer(Modifier.width(12.dp))
 
                                     OutlinedButton(onClick = {
-                                        fileFloorDbState.value = 10f
-                                        fileRangeDbState.value = 90f
+                                        fileFloorDbState.floatValue = 10f
+                                        fileRangeDbState.floatValue = 90f
                                         fileParamText = "10,90"
                                         fileHint = "已重置默认参数"
                                         if (uiMode == TxUiMode.FILE) {
@@ -975,8 +974,26 @@ class MainActivity : ComponentActivity() {
         characters: List<CharacterColor>,
         onPickColor: (String) -> Unit
     ) {
+        data class BandPalette(val label: String, val hex: String, val icon: String)
+
         var search by remember { mutableStateOf("") }
         var bandFilter by remember { mutableStateOf("") }
+        val bandPalettes = remember {
+            mapOf(
+                "Poppin'Party" to BandPalette("POP PINK", "#FF69B4", "assets/band_icon/Popipa_icon.png"),
+                "Afterglow" to BandPalette("SIGNAL RED", "#9B2423", "assets/band_icon/Afterglow_icon.png"),
+                "Pastel*Palettes" to BandPalette("PASTEL GREEN", "#B9CEAC", "assets/band_icon/Pastel_Palettes_icon.png"),
+                "Roselia" to BandPalette("DARK BLUE", "#00008B", "assets/band_icon/Roselia_icon.png"),
+                "Hello, Happy World!" to BandPalette("HAPPY YELLOW", "#FFD700", "assets/band_icon/HHW_icon.png"),
+                "Morfonica" to BandPalette("SKY BLUE", "#007CB0", "assets/band_icon/Morfonica_icon.png"),
+                "RAISE A SUILEN" to BandPalette("YELLOW GREEN", "#61993B", "assets/band_icon/RAS_icon_HD.png"),
+                "MyGO!!!!!" to BandPalette("RAINY BLUE", "#4682B4", "assets/band_icon/MyGO_icon.png"),
+                "Ave Mujica" to BandPalette("DARK RED", "#8B0000", "assets/band_icon/Icon_Ave_Mujica_temp.png"),
+                "梦限大MewType" to BandPalette("MEW tyPINK", "#FF1493", "assets/band_icon/Mugendai_muw_type_icon.png"),
+                "一家Dumb Rock!" to BandPalette("ICON COLOR", "#F4AF48", "assets/band_icon/Icon_ikka.png"),
+                "millsage" to BandPalette("ICON COLOR", "#9C25ED", "assets/band_icon/Icon_millsage.png")
+            )
+        }
         val bands = remember(characters) {
             characters.mapNotNull { it.band.takeIf { band -> band.isNotBlank() } }
                 .distinct()
@@ -1003,14 +1020,14 @@ class MainActivity : ComponentActivity() {
             )
 
             var expanded by remember { mutableStateOf(false) }
-            val bandLabel = if (bandFilter.isBlank()) "全部乐队" else bandFilter
+            val bandLabel = bandFilter.ifBlank { "全部乐队" }
             ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = !expanded }) {
                 OutlinedTextField(
                     value = bandLabel,
                     onValueChange = {},
                     readOnly = true,
                     label = { Text("乐队") },
-                    modifier = Modifier.menuAnchor().fillMaxWidth()
+                    modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable, enabled = true).fillMaxWidth()
                 )
                 ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                     DropdownMenuItem(text = { Text("全部乐队") }, onClick = {
@@ -1026,12 +1043,86 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            val bandPalette = bandPalettes[bandFilter]
+            if (bandFilter.isNotBlank() && bandPalette != null) {
+                BandColorRow(
+                    band = bandFilter,
+                    label = bandPalette.label,
+                    hex = bandPalette.hex,
+                    icon = bandPalette.icon,
+                    onPickColor = onPickColor
+                )
+            }
+
             Text("共 ${filtered.size} 名角色", style = MaterialTheme.typography.bodySmall)
 
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 filtered.forEach { item ->
                     CharacterRow(item = item, onPickColor = onPickColor)
                 }
+            }
+        }
+    }
+
+    @Composable
+    private fun BandColorRow(
+        band: String,
+        label: String,
+        hex: String,
+        icon: String,
+        onPickColor: (String) -> Unit
+    ) {
+        val imagePath = remember(icon) { CharacterRepository.resolveImagePath(icon) }
+        val rgb = remember(hex) { parseHexColor(hex) }
+        val chipColor = rgb?.let { Color(android.graphics.Color.rgb(it.first, it.second, it.third)) }
+            ?: Color.LightGray
+        ElevatedCard(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onPickColor(hex) }
+        ) {
+            Row(
+                modifier = Modifier.padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                if (imagePath != null) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.2f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        AsyncImage(
+                            model = imagePath,
+                            contentDescription = band,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Fit
+                        )
+                    }
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.2f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(band.take(1))
+                    }
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(band, style = MaterialTheme.typography.bodyLarge)
+                    Text(label, style = MaterialTheme.typography.bodySmall)
+                }
+                Box(
+                    modifier = Modifier
+                        .size(20.dp)
+                        .clip(CircleShape)
+                        .background(chipColor)
+                        .border(1.dp, Color.White, CircleShape)
+                )
             }
         }
     }
@@ -1219,9 +1310,9 @@ class MainActivity : ComponentActivity() {
             )
         }
         val frame = buildWriteMultipleRegisters(REG_MODE, values)
-        val ok = writeBlePayload(frame, { msg ->
+        val ok = writeBlePayload(frame) { msg ->
             configStatusState.value = "配置发送失败：$msg"
-        }, preferResponse = true)
+        }
         if (ok) {
             configStatusState.value = "配置已发送"
         }
@@ -1242,10 +1333,10 @@ class MainActivity : ComponentActivity() {
         notifyBuffer.reset()
         val token = ++configReadToken
         configStatusState.value = "读取中…"
-        val ok = writeBlePayload(frame, { msg ->
+        val ok = writeBlePayload(frame) { msg ->
             awaitingConfigRead = false
             configStatusState.value = "读取失败：$msg"
-        }, preferResponse = true)
+        }
         if (!ok) return
         uiHandler.postDelayed({
             if (awaitingConfigRead && configReadToken == token) {
@@ -1255,16 +1346,14 @@ class MainActivity : ComponentActivity() {
         }, 1200)
     }
 
-    private fun setLampColorFromHex(hex: String, send: Boolean) {
+    private fun setLampColorFromHex(hex: String) {
         val rgb = parseHexColor(hex) ?: return
         val hsv = rgbToHsv(rgb.first, rgb.second, rgb.third)
         val fixed = sanitizeLampHsv(hsv, lampConfigState.value.hue)
         updateLampConfig(
             lampConfigState.value.copy(hue = fixed.h, sat = fixed.s, value = fixed.v)
         )
-        if (send) {
-            sendLampConfig(lampConfigState.value)
-        }
+        sendLampConfig(lampConfigState.value)
     }
 
     private fun parseHexColor(input: String): Triple<Int, Int, Int>? {
@@ -1272,7 +1361,7 @@ class MainActivity : ComponentActivity() {
         if (raw.isEmpty()) return null
         val s = if (raw.startsWith("#")) raw.substring(1) else raw
         if (!s.matches(Regex("[0-9a-fA-F]{6}"))) return null
-        val r = s.substring(0, 2).toInt(16)
+        val r = s.take(2).toInt(16)
         val g = s.substring(2, 4).toInt(16)
         val b = s.substring(4, 6).toInt(16)
         return Triple(r, g, b)
@@ -1287,8 +1376,8 @@ class MainActivity : ComponentActivity() {
 
     private fun sanitizeLampHsv(next: HsvColor, fallbackHue: Int): HsvColor {
         var h = next.h
-        var s = next.s
-        var v = next.v
+        val s = next.s
+        val v = next.v
         if (v <= 0) {
             h = fallbackHue
         }
@@ -1313,8 +1402,7 @@ class MainActivity : ComponentActivity() {
             if (h < 0f) h += 360f
         }
         val s = if (max == 0f) 0f else d / max
-        val v = max
-        return HsvColor(h.toInt() % 360, (s * 255f).toInt(), (v * 255f).toInt())
+        return HsvColor(h.toInt() % 360, (s * 255f).toInt(), (max * 255f).toInt())
     }
 
     private fun hsvToRgb(h: Int, s: Int, v: Int): Triple<Int, Int, Int> {
@@ -1446,6 +1534,7 @@ class MainActivity : ComponentActivity() {
             val sc = scanner
             val cb = scanCallback
             if (sc != null && cb != null) sc.stopScan(cb)
+        } catch (_: SecurityException) {
         } catch (_: Exception) {
         } finally {
             scanning = false
@@ -1485,6 +1574,7 @@ class MainActivity : ComponentActivity() {
         stopAllTx()
         try {
             gatt?.disconnect()
+        } catch (_: SecurityException) {
         } catch (_: Exception) {
         }
         safeCloseGatt()
@@ -1512,8 +1602,20 @@ class MainActivity : ComponentActivity() {
             }
 
             if (newState == BluetoothProfile.STATE_CONNECTED) {
+                if (!hasPerm(Manifest.permission.BLUETOOTH_CONNECT)) {
+                    uiHandler.post { connState.value = "缺少 BLE 权限：请允许“附近设备”" }
+                    stopAllTx()
+                    safeCloseGatt()
+                    return
+                }
                 uiHandler.post { connState.value = "已连接，发现服务中…" }
-                g.discoverServices()
+                try {
+                    g.discoverServices()
+                } catch (e: SecurityException) {
+                    uiHandler.post { connState.value = "发现服务被拒：${e.message}" }
+                    stopAllTx()
+                    safeCloseGatt()
+                }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 stopAllTx()
                 safeCloseGatt()
@@ -1525,78 +1627,86 @@ class MainActivity : ComponentActivity() {
         }
 
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
+            if (!hasPerm(Manifest.permission.BLUETOOTH_CONNECT)) {
+                uiHandler.post { servicesState.value = "缺少 BLE 权限：请允许“附近设备”" }
+                return
+            }
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 uiHandler.post { servicesState.value = "服务发现失败：$status" }
                 return
             }
 
-            val svc = g.getService(UUID_FFE0)
-            var wc = svc?.getCharacteristic(UUID_FFE1)
-            var nc = svc?.getCharacteristic(UUID_FFE2)
+            try {
+                val svc = g.getService(UUID_FFE0)
+                var wc = svc?.getCharacteristic(UUID_FFE1)
+                var nc = svc?.getCharacteristic(UUID_FFE2)
 
-            if (wc == null) {
-                for (service in g.services) {
-                    val candidate = service.getCharacteristic(UUID_FFE1)
-                    if (candidate != null) {
-                        wc = candidate
-                        if (nc == null) {
-                            nc = service.getCharacteristic(UUID_FFE2)
-                        }
-                        break
-                    }
-                }
-            }
-
-            if (wc == null) {
-                for (service in g.services) {
-                    val candidate = service.characteristics.firstOrNull { ch ->
-                        ch.uuid.toString().lowercase().contains("ffe1")
-                    }
-                    if (candidate != null) {
-                        wc = candidate
-                        if (nc == null) {
-                            nc = service.characteristics.firstOrNull { ch ->
-                                ch.uuid.toString().lowercase().contains("ffe2")
+                if (wc == null) {
+                    for (service in g.services) {
+                        val candidate = service.getCharacteristic(UUID_FFE1)
+                        if (candidate != null) {
+                            wc = candidate
+                            if (nc == null) {
+                                nc = service.getCharacteristic(UUID_FFE2)
                             }
+                            break
                         }
-                        break
                     }
                 }
-            }
 
-            if (wc == null) {
-                for (service in g.services) {
-                    val candidate = service.characteristics.firstOrNull { ch ->
-                        (ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0 ||
-                            (ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
-                    }
-                    if (candidate != null) {
-                        wc = candidate
-                        if (nc == null) {
-                            nc = service.characteristics.firstOrNull { ch ->
-                                (ch.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0
+                if (wc == null) {
+                    for (service in g.services) {
+                        val candidate = service.characteristics.firstOrNull { ch ->
+                            ch.uuid.toString().lowercase().contains("ffe1")
+                        }
+                        if (candidate != null) {
+                            wc = candidate
+                            if (nc == null) {
+                                nc = service.characteristics.firstOrNull { ch ->
+                                    ch.uuid.toString().lowercase().contains("ffe2")
+                                }
                             }
+                            break
                         }
-                        break
                     }
                 }
-            }
 
-            writeChar = wc
-            notifyChar = nc
-
-            uiHandler.post {
-                servicesState.value = if (wc == null) "服务已发现（未找到FFE1）" else "服务已发现"
-            }
-
-            if (nc != null) {
-                enableNotify(g, nc)
-            }
-            if (wc != null) {
-                try {
-                    g.requestMtu(247)
-                } catch (_: Exception) {
+                if (wc == null) {
+                    for (service in g.services) {
+                        val candidate = service.characteristics.firstOrNull { ch ->
+                            (ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0 ||
+                                (ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+                        }
+                        if (candidate != null) {
+                            wc = candidate
+                            if (nc == null) {
+                                nc = service.characteristics.firstOrNull { ch ->
+                                    (ch.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0
+                                }
+                            }
+                            break
+                        }
+                    }
                 }
+
+                writeChar = wc
+                notifyChar = nc
+
+                uiHandler.post {
+                    servicesState.value = if (wc == null) "服务已发现（未找到FFE1）" else "服务已发现"
+                }
+
+                if (nc != null) {
+                    enableNotify(g, nc)
+                }
+                if (wc != null) {
+                    try {
+                        g.requestMtu(247)
+                    } catch (_: Exception) {
+                    }
+                }
+            } catch (e: SecurityException) {
+                uiHandler.post { servicesState.value = "读取服务被拒：${e.message}" }
             }
         }
         override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
@@ -1691,6 +1801,10 @@ class MainActivity : ComponentActivity() {
 
     @SuppressLint("MissingPermission")
     private fun enableNotify(g: BluetoothGatt, c: BluetoothGattCharacteristic) {
+        if (!hasPerm(Manifest.permission.BLUETOOTH_CONNECT)) {
+            uiHandler.post { servicesState.value = "缺少 BLE 权限：请允许“附近设备”" }
+            return
+        }
         try {
             val ok = g.setCharacteristicNotification(c, true)
             val desc = c.getDescriptor(UUID_CCCD)
@@ -1712,6 +1826,7 @@ class MainActivity : ComponentActivity() {
     private fun safeCloseGatt() {
         try {
             gatt?.close()
+        } catch (_: SecurityException) {
         } catch (_: Exception) {
         } finally {
             gatt = null
@@ -1728,6 +1843,11 @@ class MainActivity : ComponentActivity() {
         @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
         override fun run() {
             if (!txRunning) return
+            if (!hasPerm(Manifest.permission.BLUETOOTH_CONNECT)) {
+                txState.value = "缺少 BLE 权限：请允许“附近设备”"
+                stopAllTx()
+                return
+            }
 
             val bands = when (txSource) {
                 TxSource.SAW_400HZ -> {
@@ -1884,8 +2004,8 @@ class MainActivity : ComponentActivity() {
                     fMin = 60f,
                     fMax = (sr / 2f).coerceAtMost(8000f)
                 ).also {
-                    applyFloorToProcessorIfPossible(it, fileFloorDbState.value)
-                    it.setRangeDb(fileRangeDbState.value)
+                    applyFloorToProcessorIfPossible(it, fileFloorDbState.floatValue)
+                    it.setRangeDb(fileRangeDbState.floatValue)
                 }
             },
             onBands = { bands12 -> latestBandsRef.set(bands12) },
@@ -1896,12 +2016,12 @@ class MainActivity : ComponentActivity() {
             onProgress = { posUs, durUs ->
                 uiHandler.post {
                     if (durUs > 0) {
-                        fileDurationMsState.value = (durUs / 1000L).toInt()
+                        fileDurationMsState.intValue = (durUs / 1000L).toInt()
                     }
                     if (fileSeekingState.value) return@post
                     if (durUs > 0) {
                         val progress = (posUs.toDouble() / durUs.toDouble()).toFloat()
-                        fileProgressState.value = progress.coerceIn(0f, 1f)
+                        fileProgressState.floatValue = progress.coerceIn(0f, 1f)
                         val posMs = (posUs / 1000L).toInt()
                         val durMs = (durUs / 1000L).toInt()
                         fileProgressTextState.value = "${fmtMmSs(posMs)} / ${fmtMmSs(durMs)}"
@@ -1912,7 +2032,7 @@ class MainActivity : ComponentActivity() {
 
         val ok = try {
             engine.start()
-        } catch (e: SecurityException) {
+        } catch (_: SecurityException) {
             fileState.value = "FILE: 权限被拒绝"
             false
         }
@@ -1935,9 +2055,9 @@ class MainActivity : ComponentActivity() {
         fileEngine = null
         fileState.value = "FILE: STOP"
         latestBandsRef.set(IntArray(12))
-        fileProgressState.value = 0f
+        fileProgressState.floatValue = 0f
         fileProgressTextState.value = "00:00 / 00:00"
-        fileDurationMsState.value = 0
+        fileDurationMsState.intValue = 0
     }
 
     private fun stopAllTx() {
@@ -1988,9 +2108,9 @@ class MainActivity : ComponentActivity() {
     private fun drainTxQueue() {
         if (writeInFlight || txQueue.isEmpty()) return
         val frame = txQueue.removeFirst()
-        val ok = writeBlePayload(frame, { msg ->
+        val ok = writeBlePayload(frame) { msg ->
             txState.value = "TX: $msg"
-        }, preferResponse = true)
+        }
         if (!ok) {
             txQueue.clear()
         }
@@ -1999,8 +2119,7 @@ class MainActivity : ComponentActivity() {
     @SuppressLint("MissingPermission")
     private fun writeBlePayload(
         payload: ByteArray,
-        onError: (String) -> Unit,
-        preferResponse: Boolean = false
+        onError: (String) -> Unit
     ): Boolean {
         val g = gatt ?: run {
             onError("未连接")
@@ -2008,6 +2127,10 @@ class MainActivity : ComponentActivity() {
         }
         val wc = writeChar ?: run {
             onError("未找到FFE1")
+            return false
+        }
+        if (!hasPerm(Manifest.permission.BLUETOOTH_CONNECT)) {
+            onError("缺少 BLE 权限：请允许“附近设备”")
             return false
         }
         try {
@@ -2022,7 +2145,7 @@ class MainActivity : ComponentActivity() {
                 return false
             }
             val writeType =
-                if ((needsLongWrite || preferResponse) && supportsWrite) {
+                if (supportsWrite) {
                     BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
                 } else if (supportsWnr) {
                     BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
@@ -2072,6 +2195,7 @@ class MainActivity : ComponentActivity() {
 
     // ---------------- Helpers ----------------
 
+    @SuppressLint("DefaultLocale")
     private fun fmtMmSs(ms: Int): String {
         val s = max(0, ms / 1000)
         val m = s / 60
