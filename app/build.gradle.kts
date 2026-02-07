@@ -27,8 +27,8 @@ android {
         applicationId = "com.example.nichirin"
         minSdk = 31
         targetSdk = 36
-        versionCode = 1
-        versionName = "9.47"
+        versionCode = 300
+        versionName = "3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

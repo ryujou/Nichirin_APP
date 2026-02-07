@@ -51,6 +51,7 @@ import com.example.nichirin.ui.theme.NichirinTheme
 import java.lang.reflect.Method
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.max
+import kotlin.math.pow
 import kotlin.random.Random
 
 // 你工程里如果已有这些，删除本文件的重复定义即可
@@ -80,6 +81,8 @@ private data class LampConfig(
 private data class HsvColor(val h: Int, val s: Int, val v: Int)
 
 private enum class DetailTab { CONSOLE, CHARACTERS }
+
+private const val COLOR_TX_GAMMA = 2.2
 
 class MainActivity : ComponentActivity() {
 
@@ -1293,19 +1296,20 @@ class MainActivity : ComponentActivity() {
 
     private fun sendLampConfig(config: LampConfig) {
         if (!ensureBlePermOrHint()) return
+        val txColor = applyGammaToHsvForTx(HsvColor(config.hue, config.sat, config.value))
         val values = if (config.mode == 5) {
             intArrayOf(
                 config.mode and 0xFFFF,
-                clampInt(config.hue, 0, 359),
-                clampInt(config.sat, 0, 255),
-                clampInt(config.value, 0, 255)
+                clampInt(txColor.h, 0, 359),
+                clampInt(txColor.s, 0, 255),
+                clampInt(txColor.v, 0, 255)
             )
         } else {
             intArrayOf(
                 config.mode and 0xFFFF,
-                clampInt(config.hue, 0, 359),
-                clampInt(config.sat, 0, 255),
-                clampInt(config.value, 0, 255),
+                clampInt(txColor.h, 0, 359),
+                clampInt(txColor.s, 0, 255),
+                clampInt(txColor.v, 0, 255),
                 clampInt(config.param, 0, 255)
             )
         }
@@ -1424,6 +1428,27 @@ class MainActivity : ComponentActivity() {
         val g = ((g1 + m) * 255f).toInt()
         val b = ((b1 + m) * 255f).toInt()
         return Triple(r, g, b)
+    }
+
+    private fun applyGammaToHsvForTx(input: HsvColor): HsvColor {
+        if (COLOR_TX_GAMMA <= 0.0 || kotlin.math.abs(COLOR_TX_GAMMA - 1.0) < 1e-6) {
+            return sanitizeLampHsv(input, input.h)
+        }
+        val rgb = hsvToRgb(input.h, input.s, input.v)
+        val corrected = Triple(
+            gammaEncode8bit(rgb.first, COLOR_TX_GAMMA),
+            gammaEncode8bit(rgb.second, COLOR_TX_GAMMA),
+            gammaEncode8bit(rgb.third, COLOR_TX_GAMMA)
+        )
+        return sanitizeLampHsv(
+            rgbToHsv(corrected.first, corrected.second, corrected.third),
+            input.h
+        )
+    }
+
+    private fun gammaEncode8bit(channel: Int, gamma: Double): Int {
+        val normalized = clampInt(channel, 0, 255) / 255.0
+        return (normalized.pow(gamma) * 255.0 + 0.5).toInt().coerceIn(0, 255)
     }
 
     private fun formatParamHint(mode: Int, param: Int): String {
